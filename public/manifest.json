@@ -1,0 +1,18 @@
+{
+  "name": "The Final Stitch",
+  "short_name": "Final Stitch",
+  "description": "Track your canvas from drop-off to done.",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#7D9E8C",
+  "background_color": "#FFFFFF",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

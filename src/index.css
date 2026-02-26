@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+@theme {
+  --color-sage-50: #f0f5f2;
+  --color-sage-100: #dce8e0;
+  --color-sage-200: #b9d1c1;
+  --color-sage-300: #96baa2;
+  --color-sage-400: #7D9E8C;
+  --color-sage-500: #6a8a78;
+  --color-sage-600: #557060;
+  --color-sage-700: #405548;
+  --color-sage-800: #2b3a30;
+  --color-sage-900: #161e18;
+
+  --color-gold-50: #fdf8eb;
+  --color-gold-100: #f9edd0;
+  --color-gold-200: #f0d89a;
+  --color-gold-300: #e4c06a;
+  --color-gold-400: #C9A84C;
+  --color-gold-500: #b08f3a;
+  --color-gold-600: #8d722e;
+  --color-gold-700: #6a5623;
+  --color-gold-800: #473917;
+  --color-gold-900: #231d0c;
+
+  --color-charcoal: #2D2D2D;
+  --color-charcoal-light: #4A4A4A;
+
+  --font-heading: 'Playfair Display', serif;
+  --font-body: 'Inter', sans-serif;
+}
+
+body {
+  font-family: var(--font-body);
+  color: var(--color-charcoal);
+  background-color: #ffffff;
+  margin: 0;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-heading);
+}
+
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="date"],
+textarea,
+select {
+  font-family: var(--font-body);
+}

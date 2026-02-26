@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init)",
+      "Bash(git add -A)",
+      "Bash(python3 -c \":*)",
+      "Bash(python3:*)",
+      "Bash(npm install --cache /tmp/npm-cache)",
+      "Bash(npx tsc -b)",
+      "Bash(npx vite build)"
+    ]
+  }
+}

@@ -8,7 +8,6 @@ with each color on its own named layer, ready for manufacturer.
 import sys
 import os
 import subprocess
-import numpy as np
 
 
 # Install required libraries
@@ -20,6 +19,7 @@ def install_requirements():
 
 install_requirements()
 
+import numpy as np
 from PIL import Image
 import vtracer
 
@@ -45,7 +45,7 @@ def hex_to_rgb(hex_color):
 
 
 def color_distance(c1, c2):
-    return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
+    return sum((int(a) - int(b)) ** 2 for a, b in zip(c1, c2)) ** 0.5
 
 
 def snap_to_palette(img_array):

@@ -24,3 +24,7 @@ dist-ssr
 *.sw?
 
 .vite/
+
+# Python
+__pycache__/
+*.pyc

@@ -52,6 +52,10 @@ PANTONE_TABLE = [
     ((0, 133, 63), "Green", "348c"),
     ((0, 104, 56), "Dark Green", "349c"),
     ((100, 160, 90), "Sage", "7490c"),
+    ((135, 206, 235), "Sky Blue", "2905c"),
+    ((173, 216, 230), "Light Blue", "2905c"),
+    ((137, 207, 240), "Baby Blue", "291c"),
+    ((100, 180, 220), "Cyan Blue", "2985c"),
     ((0, 114, 187), "Blue", "660c"),
     ((0, 84, 166), "Royal Blue", "661c"),
     ((100, 125, 177), "Periwinkle", "7683c"),
@@ -95,9 +99,10 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 
     # Step 2: Posterize — reduce each channel to fewer levels
     # This snaps similar shades to the same value, flattening gradients
-    # 4 levels per channel = 64 possible colors, which is plenty for enamel
+    # 6 levels per channel (step=43) preserves browns/golds while still flattening
+    step = 43
     img = Image.fromarray(
-        (np.array(img) // 64 * 64 + 32).clip(0, 255).astype(np.uint8)
+        (np.array(img) // step * step + step // 2).clip(0, 255).astype(np.uint8)
     )
 
     # Step 3: Boost saturation — makes distinct hues (blue china, gold) pop
@@ -722,6 +727,13 @@ def vectorize_enamel(
     if len(merged) > num_colors:
         print(f"Step 4: Selecting {num_colors} colors with hue diversity...")
         merged = select_colors_by_hue(merged, num_colors)
+
+    # Step 4b: Final dedup — merge any remaining near-duplicate colors
+    # (e.g., two yellows that slipped through hue selection)
+    if len(merged) > 2:
+        merged = merge_similar_colors(merged, threshold=50.0)
+        if len(merged) < num_colors:
+            print(f"  Deduped to {len(merged)} distinct colors")
 
     # Step 5: Clean masks
     print(f"Step 5: Cleaning up {len(merged)} enamel fill regions...")

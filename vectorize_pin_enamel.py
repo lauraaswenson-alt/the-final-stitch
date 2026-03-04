@@ -624,9 +624,10 @@ def vectorize_enamel(
     num_colors: int = 5,
     max_dimension: int = 512,
     metal: str = "gold",
-    border_width: float = 1.5,
+    border_width: float = 0.8,
     merge_threshold: float = 35.0,
     pin_width_mm: float = 44.0,
+    print_color_hint: str | None = None,
 ) -> str:
     """Enamel pin manufacturing spec sheet pipeline."""
     if not os.path.isfile(image_path):
@@ -668,21 +669,79 @@ def vectorize_enamel(
         layers[(r, g, b)] = mask
     print(f"  Found {len(layers)} unique colors")
 
-    # Step 2: Extract print layer (fine detail) before merging
-    print("Step 2: Detecting print layer (fine detail patterns)...")
-    print_mask, print_color = extract_print_layer(img, layers)
-    if print_color is not None:
-        pantone_code, pantone_name = find_closest_pantone(*print_color)
-        print(f"  Detected print layer: #{print_color[0]:02x}{print_color[1]:02x}{print_color[2]:02x} ({pantone_name}, {pantone_code})")
-        # Remove print color from enamel layers
-        colors_to_remove = []
-        for clr in layers:
-            if color_distance(clr, print_color) < merge_threshold:
-                colors_to_remove.append(clr)
-        for clr in colors_to_remove:
-            del layers[clr]
+    # Step 2: Extract print layer
+    print_mask = None
+    print_color = None
+
+    if print_color_hint:
+        # User specified which color is the print layer
+        print(f"Step 2: Using specified print color: {print_color_hint}")
+        # Map color names to hue ranges
+        hue_map = {
+            "blue": (180, 260), "red": (330, 30), "green": (90, 150),
+            "purple": (260, 330), "orange": (15, 45), "yellow": (45, 75),
+        }
+        hint = print_color_hint.lower().strip()
+
+        if hint in hue_map:
+            hue_lo, hue_hi = hue_map[hint]
+            # Find all layers matching this hue and combine them
+            matching_masks = []
+            matching_color = None
+            best_area = 0
+            for clr, mask in list(layers.items()):
+                r, g, b = clr
+                sat = max(r, g, b) - min(r, g, b)
+                if sat < 20:
+                    continue  # skip grays
+                h_val, _, _ = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+                hue_deg = h_val * 360
+                # Handle wrap-around for red
+                if hue_lo > hue_hi:
+                    in_range = hue_deg >= hue_lo or hue_deg < hue_hi
+                else:
+                    in_range = hue_lo <= hue_deg < hue_hi
+                if in_range:
+                    matching_masks.append(mask)
+                    area = int(np.sum(mask))
+                    if area > best_area:
+                        best_area = area
+                        matching_color = clr
+
+            if matching_masks:
+                # Combine all matching color masks into one print layer
+                print_mask = matching_masks[0]
+                for m in matching_masks[1:]:
+                    print_mask = np.maximum(print_mask, m)
+                print_color = matching_color
+                pantone_code, pantone_name = find_closest_pantone(*print_color)
+                print(f"  Print layer: #{print_color[0]:02x}{print_color[1]:02x}{print_color[2]:02x} ({pantone_name}, {pantone_code})")
+                # Remove matching colors from enamel layers
+                colors_to_remove = [clr for clr in layers
+                                    if any(np.array_equal(layers[clr], m) for m in matching_masks)
+                                    or color_distance(clr, print_color) < merge_threshold]
+                for clr in set(colors_to_remove):
+                    if clr in layers:
+                        del layers[clr]
+            else:
+                print(f"  Warning: No {hint} colors found, skipping print layer")
+        else:
+            print(f"  Warning: Unknown color '{hint}', use: blue, red, green, purple, orange, yellow")
     else:
-        print("  No distinct print layer detected")
+        # Auto-detect
+        print("Step 2: Auto-detecting print layer (fine detail patterns)...")
+        print_mask, print_color = extract_print_layer(img, layers)
+        if print_color is not None:
+            pantone_code, pantone_name = find_closest_pantone(*print_color)
+            print(f"  Detected print layer: #{print_color[0]:02x}{print_color[1]:02x}{print_color[2]:02x} ({pantone_name}, {pantone_code})")
+            colors_to_remove = []
+            for clr in layers:
+                if color_distance(clr, print_color) < merge_threshold:
+                    colors_to_remove.append(clr)
+            for clr in colors_to_remove:
+                del layers[clr]
+        else:
+            print("  No distinct print layer detected")
 
     # Step 3: Merge similar colors
     print(f"Step 3: Merging similar colors (threshold={merge_threshold})...")
@@ -762,8 +821,12 @@ def main():
         help="Pin width in millimeters (default: 44.0)",
     )
     parser.add_argument(
-        "--border-width", type=float, default=1.5,
-        help="Metal border line width in pixels (default: 1.5)",
+        "--print-color", default=None,
+        help="Color of the print layer: blue, red, green, purple, orange, yellow (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--border-width", type=float, default=0.8,
+        help="Metal border line width in pixels (default: 0.8)",
     )
     parser.add_argument(
         "--merge-threshold", type=float, default=35.0,
@@ -788,6 +851,7 @@ def main():
         border_width=args.border_width,
         merge_threshold=args.merge_threshold,
         pin_width_mm=args.size,
+        print_color_hint=args.print_color,
     )
 
 

@@ -85,36 +85,19 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     """
     Preprocess a photo to prepare it for enamel pin vectorization.
 
-    Enamel pins need flat, solid colors — no gradients, no shading, no texture.
-    This pipeline aggressively simplifies the image:
-    1. Strong blur to eliminate texture and merge shading into flat regions
-    2. Posterize to snap colors to flat bands (removes subtle gradients)
-    3. Boost saturation so distinct hues (blue, gold, etc.) don't get lost
-    4. Increase contrast to sharpen boundaries between color regions
-    5. Final blur to smooth any posterization artifacts
+    Light touch — just enough to clean up noise without destroying detail.
+    The bull's eyes, outlines, and crisp edges must survive.
     """
-    # Step 1: Strong blur to eliminate texture, shading, and fine detail
-    # This merges gradients into uniform regions (e.g., shaded bull body -> flat gold)
-    img = img.filter(ImageFilter.GaussianBlur(radius=3.0))
+    # Light blur to reduce photo noise — NOT destroy detail
+    img = img.filter(ImageFilter.GaussianBlur(radius=1.0))
 
-    # Step 2: Posterize — reduce each channel to fewer levels
-    # This snaps similar shades to the same value, flattening gradients
-    # 6 levels per channel (step=43) preserves browns/golds while still flattening
-    step = 43
-    img = Image.fromarray(
-        (np.array(img) // step * step + step // 2).clip(0, 255).astype(np.uint8)
-    )
-
-    # Step 3: Boost saturation — makes distinct hues (blue china, gold) pop
+    # Boost saturation so distinct hues (blue, gold) don't get lost
     enhancer = ImageEnhance.Color(img)
-    img = enhancer.enhance(1.5)  # Moderate boost — preserves browns vs pure orange
+    img = enhancer.enhance(1.5)
 
-    # Step 4: Increase contrast to sharpen color region boundaries
+    # Increase contrast to sharpen color boundaries
     enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(1.4)
-
-    # Step 5: Final smoothing blur to clean up posterization edges
-    img = img.filter(ImageFilter.GaussianBlur(radius=2.0))
+    img = enhancer.enhance(1.3)
 
     return img
 
@@ -141,7 +124,7 @@ def select_colors_by_hue(
 
         if brightness > 220 and saturation < 30:
             bucket = "white"
-        elif brightness < 40:
+        elif brightness < 60:
             bucket = "black"
         elif saturation < 25:
             bucket = "gray"
@@ -172,10 +155,18 @@ def select_colors_by_hue(
     selected = {}
     remaining_slots = num_colors
 
-    # First pass: one from each distinct hue
+    # Priority pass: always include black/dark if it exists (eyes, outlines)
+    if "black" in hue_buckets and remaining_slots > 0:
+        color, mask, area = hue_buckets["black"][0]
+        selected[color] = mask
+        remaining_slots -= 1
+
+    # First pass: one from each distinct hue (by area, largest first)
     for bucket_name in sorted(hue_buckets.keys(), key=lambda b: hue_buckets[b][0][2], reverse=True):
         if remaining_slots <= 0:
             break
+        if bucket_name == "black" and any(c == hue_buckets["black"][0][0] for c in selected):
+            continue  # Already added
         color, mask, area = hue_buckets[bucket_name][0]
         selected[color] = mask
         remaining_slots -= 1

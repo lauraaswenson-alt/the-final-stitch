@@ -21,12 +21,13 @@ Output: Illustrator-compatible SVG spec sheet that can be sent directly to facto
 """
 
 import argparse
+import colorsys
 import math
 import os
 import sys
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter
 
 
 # --- Pantone Matching ---
@@ -75,6 +76,119 @@ METAL_COLORS = {
     "rose-gold": ("#b76e79", "#9a5060"),
     "gunmetal": ("#4a4a4a", "#333333"),
 }
+
+
+def preprocess_image(img: Image.Image) -> Image.Image:
+    """
+    Preprocess a photo to prepare it for enamel pin vectorization.
+
+    - Boost color saturation so subtle blues/greens don't get lost in dominant golds
+    - Increase contrast to sharpen color boundaries
+    - Slight blur to reduce photo noise before quantization
+    """
+    # Boost saturation — makes the blue china pattern pop against the gold
+    enhancer = ImageEnhance.Color(img)
+    img = enhancer.enhance(1.8)  # 1.0 = original, 1.8 = strong boost
+
+    # Increase contrast to make color regions more distinct
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(1.3)
+
+    # Slight blur to reduce photo noise (prevents noisy quantization)
+    img = img.filter(ImageFilter.GaussianBlur(radius=1.5))
+
+    return img
+
+
+def select_colors_by_hue(
+    layers: dict[tuple, np.ndarray], num_colors: int
+) -> dict[tuple, np.ndarray]:
+    """
+    Select final colors ensuring distinct hues are represented.
+
+    Instead of just picking the N largest regions (which gives 5 shades of gold),
+    this groups colors by hue and picks the largest from each hue group first,
+    then fills remaining slots by area.
+    """
+    if len(layers) <= num_colors:
+        return layers
+
+    # Group colors by hue bucket
+    hue_buckets: dict[str, list] = {}
+    for color, mask in layers.items():
+        r, g, b = color
+        brightness = (r * 299 + g * 587 + b * 114) / 1000
+        saturation = max(r, g, b) - min(r, g, b)
+
+        if brightness > 220 and saturation < 30:
+            bucket = "white"
+        elif brightness < 40:
+            bucket = "black"
+        elif saturation < 25:
+            bucket = "gray"
+        else:
+            # Get hue
+            h, _, _ = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+            hue_deg = h * 360
+            if hue_deg < 30 or hue_deg >= 330:
+                bucket = "red"
+            elif hue_deg < 75:
+                bucket = "orange-gold"
+            elif hue_deg < 150:
+                bucket = "green"
+            elif hue_deg < 260:
+                bucket = "blue"
+            else:
+                bucket = "purple"
+
+        if bucket not in hue_buckets:
+            hue_buckets[bucket] = []
+        hue_buckets[bucket].append((color, mask, int(np.sum(mask))))
+
+    # Sort each bucket by area (largest first)
+    for bucket in hue_buckets:
+        hue_buckets[bucket].sort(key=lambda x: x[2], reverse=True)
+
+    # Pick the largest from each hue bucket first
+    selected = {}
+    remaining_slots = num_colors
+
+    # First pass: one from each distinct hue
+    for bucket_name in sorted(hue_buckets.keys(), key=lambda b: hue_buckets[b][0][2], reverse=True):
+        if remaining_slots <= 0:
+            break
+        color, mask, area = hue_buckets[bucket_name][0]
+        selected[color] = mask
+        remaining_slots -= 1
+
+    # Second pass: fill remaining slots with largest unselected colors across all buckets
+    all_remaining = []
+    for bucket_name, items in hue_buckets.items():
+        for color, mask, area in items:
+            if color not in selected:
+                all_remaining.append((color, mask, area))
+    all_remaining.sort(key=lambda x: x[2], reverse=True)
+
+    for color, mask, area in all_remaining:
+        if remaining_slots <= 0:
+            break
+        selected[color] = mask
+        remaining_slots -= 1
+
+    # Merge anything not selected into closest selected color
+    for bucket_items in hue_buckets.values():
+        for color, mask, area in bucket_items:
+            if color not in selected:
+                best_dist = float("inf")
+                best_color = list(selected.keys())[0]
+                for sel_color in selected:
+                    d = color_distance(color, sel_color)
+                    if d < best_dist:
+                        best_dist = d
+                        best_color = sel_color
+                selected[best_color] = np.maximum(selected[best_color], mask)
+
+    return selected
 
 
 def find_closest_pantone(r: int, g: int, b: int) -> tuple[str, str]:
@@ -253,7 +367,6 @@ def build_spec_sheet(
     print_color: tuple | None,
     metal: str,
     pin_width_mm: float,
-    num_magnets: int,
     border_width: float,
 ) -> str:
     """
@@ -285,12 +398,12 @@ def build_spec_sheet(
     # Find cut-out areas (holes in silhouette)
     cutout_mask = 1 - silhouette
 
-    # Spec sheet layout: 3 views across top, detail + legend below
+    # Spec sheet layout: 2 views across top, detail + legend below
     margin = 40
     spacing = 60
     view_w = width
     view_h = height
-    sheet_w = margin + view_w * 3 + spacing * 2 + margin
+    sheet_w = margin + view_w * 2 + spacing + margin
     # Bottom section for print detail and legend
     legend_h = max(200, len(sorted_layers) * 28 + 80)
     sheet_h = margin + view_h + spacing + legend_h + margin
@@ -402,78 +515,31 @@ def build_spec_sheet(
     lines.append(f'  <text x="{v2_x + view_w / 2}" y="{dim_y_bot + 14}" text-anchor="middle" class="dim">{pin_width_mm:.2f} mm</text>')
 
     # =========================================
-    # VIEW 3: Silhouette / back view
+    # Cut-out marks (X) — only for interior holes, not background
     # =========================================
-    v3_x = margin + (view_w + spacing) * 2
-    v3_y = v1_y
-
-    lines.append(f'  <!-- VIEW 3: Silhouette / Back -->')
-    lines.append(f'  <g id="View 3 - Back / Silhouette" i:layer="yes" transform="translate({v3_x},{v3_y})">')
-
-    # Solid gold silhouette
-    if silhouette_paths:
-        lines.append(f'    <path d="{" ".join(silhouette_paths)}" fill="{metal_raised}"/>')
-
-    # Magnet indicators
-    if num_magnets > 0:
-        # Place magnets evenly
-        magnet_r = 8
-        magnet_positions = []
-        if num_magnets == 1:
-            magnet_positions = [(width // 2, height // 2)]
-        elif num_magnets == 2:
-            magnet_positions = [(width // 2, height // 3), (width // 2, height * 2 // 3)]
-        elif num_magnets == 4:
-            magnet_positions = [
-                (width // 3, height // 3),
-                (width * 2 // 3, height // 3),
-                (width // 3, height * 2 // 3),
-                (width * 2 // 3, height * 2 // 3),
-            ]
-        else:
-            # Distribute vertically
-            for i in range(num_magnets):
-                y_pos = int(height * (i + 1) / (num_magnets + 1))
-                magnet_positions.append((width // 2, y_pos))
-
-        for mx, my in magnet_positions:
-            lines.append(f'    <circle cx="{mx}" cy="{my}" r="{magnet_r}" fill="#888" stroke="#555" stroke-width="1"/>')
-            lines.append(f'    <text x="{mx}" y="{my + 3}" text-anchor="middle" style="font-size:6px;fill:#333">N42</text>')
-
-    lines.append('  </g>')
-
-    # Magnet spec text
-    if num_magnets > 0:
-        lines.append(f'  <text x="{v3_x + view_w + 10}" y="{v3_y + view_h // 2}" class="label">Size: 10mm</text>')
-        lines.append(f'  <text x="{v3_x + view_w + 10}" y="{v3_y + view_h // 2 + 16}" class="label">N42 magnet*{num_magnets}pcs</text>')
-
-    # =========================================
-    # Cut-out marks (X) on all views
-    # =========================================
-    # Find cut-out regions and mark with X
+    # Interior holes are cut-out regions fully surrounded by the silhouette
+    # (not touching any edge of the image)
     if np.sum(cutout_mask) > 50:
-        # Find cut-out region centroids using connected components approach
-        # Simple: find bounding boxes of cut-out regions
-        from PIL import Image as PILImage
-        cutout_img = PILImage.fromarray(cutout_mask * 255, mode="L")
-        # Erode to find distinct cut-out regions
-        cutout_eroded = cutout_img.filter(ImageFilter.MinFilter(5))
+        cutout_img = Image.fromarray(cutout_mask * 255, mode="L")
+        cutout_eroded = cutout_img.filter(ImageFilter.MinFilter(7))
         cutout_arr = np.array(cutout_eroded) > 127
 
-        # Find connected regions by scanning for isolated blobs
         labeled = np.zeros_like(cutout_arr, dtype=int)
         current_label = 0
         for y in range(height):
             for x in range(width):
                 if cutout_arr[y, x] and labeled[y, x] == 0:
-                    # BFS to find connected component
                     current_label += 1
                     queue = [(y, x)]
                     labeled[y, x] = current_label
                     region_pixels = []
+                    touches_edge = False
                     while queue:
                         cy, cx = queue.pop(0)
                         region_pixels.append((cx, cy))
+                        # Check if this pixel touches the image edge
+                        if cy == 0 or cy == height - 1 or cx == 0 or cx == width - 1:
+                            touches_edge = True
                         for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
                             ny, nx = cy + dy, cx + dx
                             if 0 <= ny < height and 0 <= nx < width:
@@ -481,11 +547,11 @@ def build_spec_sheet(
                                     labeled[ny, nx] = current_label
                                     queue.append((ny, nx))
 
-                    if len(region_pixels) > 20:
-                        # Mark centroid with X
+                    # Only mark interior holes (not touching edge, reasonable size)
+                    if not touches_edge and 50 < len(region_pixels) < (width * height * 0.3):
                         cx = sum(p[0] for p in region_pixels) // len(region_pixels)
                         cy = sum(p[1] for p in region_pixels) // len(region_pixels)
-                        for vx in [v1_x, v2_x, v3_x]:
+                        for vx in [v1_x, v2_x]:
                             lines.append(f'  <text x="{vx + cx}" y="{v1_y + cy + 5}" text-anchor="middle" class="cutout">x</text>')
 
     # =========================================
@@ -561,7 +627,6 @@ def vectorize_enamel(
     border_width: float = 1.5,
     merge_threshold: float = 35.0,
     pin_width_mm: float = 44.0,
-    num_magnets: int = 4,
 ) -> str:
     """Enamel pin manufacturing spec sheet pipeline."""
     if not os.path.isfile(image_path):
@@ -583,6 +648,10 @@ def vectorize_enamel(
         print(f"Resized {orig_w}x{orig_h} -> {new_w}x{new_h}")
 
     w, h = img.size
+
+    # Step 0: Preprocess image for clean color extraction
+    print("Step 0: Preprocessing image (boost saturation, contrast, denoise)...")
+    img = preprocess_image(img)
 
     # Step 1: Initial quantization
     initial_colors = min(num_colors * 6, 48)
@@ -620,21 +689,10 @@ def vectorize_enamel(
     merged = merge_similar_colors(layers, threshold=merge_threshold)
     print(f"  Reduced to {len(merged)} colors")
 
-    # Step 4: Keep top N enamel colors
+    # Step 4: Select colors ensuring hue diversity (not just 5 golds)
     if len(merged) > num_colors:
-        print(f"Step 4: Keeping top {num_colors} enamel fill colors...")
-        sorted_colors = sorted(merged.items(), key=lambda x: int(np.sum(x[1])), reverse=True)
-        kept = dict(sorted_colors[:num_colors])
-        for drop_color, drop_mask in sorted_colors[num_colors:]:
-            best_dist = float("inf")
-            best_color = list(kept.keys())[0]
-            for kept_color in kept:
-                d = color_distance(drop_color, kept_color)
-                if d < best_dist:
-                    best_dist = d
-                    best_color = kept_color
-            kept[best_color] = np.maximum(kept[best_color], drop_mask)
-        merged = kept
+        print(f"Step 4: Selecting {num_colors} colors with hue diversity...")
+        merged = select_colors_by_hue(merged, num_colors)
 
     # Step 5: Clean masks
     print(f"Step 5: Cleaning up {len(merged)} enamel fill regions...")
@@ -658,7 +716,7 @@ def vectorize_enamel(
     print(f"\nStep 6: Building spec sheet...")
     content = build_spec_sheet(
         w, h, cleaned, print_mask, print_color,
-        metal, pin_width_mm, num_magnets, border_width,
+        metal, pin_width_mm, border_width,
     )
 
     with open(output_path, "w", encoding="utf-8") as f:
@@ -674,7 +732,6 @@ def vectorize_enamel(
     if print_color:
         pc, pn = find_closest_pantone(*print_color)
         print(f"  Print layer: {pc} ({pn})")
-    print(f"  Back: N42 magnet x{num_magnets}")
 
     return output_path
 
@@ -705,10 +762,6 @@ def main():
         help="Pin width in millimeters (default: 44.0)",
     )
     parser.add_argument(
-        "--magnets", type=int, default=4,
-        help="Number of N42 magnets on back (default: 4)",
-    )
-    parser.add_argument(
         "--border-width", type=float, default=1.5,
         help="Metal border line width in pixels (default: 1.5)",
     )
@@ -735,7 +788,6 @@ def main():
         border_width=args.border_width,
         merge_threshold=args.merge_threshold,
         pin_width_mm=args.size,
-        num_magnets=args.magnets,
     )
 
 

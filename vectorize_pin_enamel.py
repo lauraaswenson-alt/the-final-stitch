@@ -184,6 +184,13 @@ def extract_print_layer(
         if pixel_count < 100 or pixel_count > (h * w * 0.4):
             continue
 
+        # Skip whites/near-whites and very light colors — these are enamel base, not print
+        r, g, b = color
+        brightness = (r * 299 + g * 587 + b * 114) / 1000
+        saturation = max(r, g, b) - min(r, g, b)
+        if brightness > 200 and saturation < 50:
+            continue  # Skip white/cream — never a print layer
+
         # Count transitions (edges) - detailed patterns have many
         h_transitions = np.sum(np.abs(np.diff(mask.astype(np.int8), axis=1)))
         v_transitions = np.sum(np.abs(np.diff(mask.astype(np.int8), axis=0)))

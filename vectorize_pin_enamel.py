@@ -8,7 +8,6 @@ Produces manufacturing-ready output matching the format pin factories expect:
   - Metal borders between enamel fill regions
   - Pantone color matching for each fill
   - Physical dimensions (mm) with dimension lines
-  - Cut-out marks on pin outline
   - Separated print layer for screen-printed detail
   - Default imitation gold metal
 
@@ -82,20 +81,35 @@ def preprocess_image(img: Image.Image) -> Image.Image:
     """
     Preprocess a photo to prepare it for enamel pin vectorization.
 
-    - Boost color saturation so subtle blues/greens don't get lost in dominant golds
-    - Increase contrast to sharpen color boundaries
-    - Slight blur to reduce photo noise before quantization
+    Enamel pins need flat, solid colors — no gradients, no shading, no texture.
+    This pipeline aggressively simplifies the image:
+    1. Strong blur to eliminate texture and merge shading into flat regions
+    2. Posterize to snap colors to flat bands (removes subtle gradients)
+    3. Boost saturation so distinct hues (blue, gold, etc.) don't get lost
+    4. Increase contrast to sharpen boundaries between color regions
+    5. Final blur to smooth any posterization artifacts
     """
-    # Boost saturation — makes the blue china pattern pop against the gold
+    # Step 1: Strong blur to eliminate texture, shading, and fine detail
+    # This merges gradients into uniform regions (e.g., shaded bull body -> flat gold)
+    img = img.filter(ImageFilter.GaussianBlur(radius=3.0))
+
+    # Step 2: Posterize — reduce each channel to fewer levels
+    # This snaps similar shades to the same value, flattening gradients
+    # 4 levels per channel = 64 possible colors, which is plenty for enamel
+    img = Image.fromarray(
+        (np.array(img) // 64 * 64 + 32).clip(0, 255).astype(np.uint8)
+    )
+
+    # Step 3: Boost saturation — makes distinct hues (blue china, gold) pop
     enhancer = ImageEnhance.Color(img)
-    img = enhancer.enhance(1.8)  # 1.0 = original, 1.8 = strong boost
+    img = enhancer.enhance(2.0)  # Strong boost after posterize
 
-    # Increase contrast to make color regions more distinct
+    # Step 4: Increase contrast to sharpen color region boundaries
     enhancer = ImageEnhance.Contrast(img)
-    img = enhancer.enhance(1.3)
+    img = enhancer.enhance(1.4)
 
-    # Slight blur to reduce photo noise (prevents noisy quantization)
-    img = img.filter(ImageFilter.GaussianBlur(radius=1.5))
+    # Step 5: Final smoothing blur to clean up posterization edges
+    img = img.filter(ImageFilter.GaussianBlur(radius=2.0))
 
     return img
 
@@ -395,9 +409,6 @@ def build_spec_sheet(
     for _, mask in layers.items():
         silhouette = np.maximum(silhouette, mask)
 
-    # Find cut-out areas (holes in silhouette)
-    cutout_mask = 1 - silhouette
-
     # Spec sheet layout: 2 views across top, detail + legend below
     margin = 40
     spacing = 60
@@ -421,7 +432,6 @@ def build_spec_sheet(
         '    .label { font-size: 11px; fill: #333; }',
         '    .title { font-size: 14px; fill: #333; font-weight: bold; }',
         '    .legend-text { font-size: 10px; fill: #333; }',
-        '    .cutout { font-size: 14px; fill: #cc0000; font-weight: bold; }',
         '  </style>',
         '',
         f'  <!-- Sheet background -->',
@@ -436,6 +446,7 @@ def build_spec_sheet(
     v1_y = margin + 20
 
     lines.append(f'  <!-- VIEW 1: Enamel fills -->')
+    lines.append(f'  <text x="{v1_x + view_w / 2}" y="{v1_y - 6}" text-anchor="middle" class="title">Enamel Fills</text>')
     lines.append(f'  <g id="View 1 - Enamel Fills" i:layer="yes" transform="translate({v1_x},{v1_y})">')
 
     # Metal base for pin shape
@@ -456,12 +467,6 @@ def build_spec_sheet(
     border_paths = merge_horizontal_runs(borders)
     if border_paths:
         lines.append(f'    <path d="{" ".join(border_paths)}" fill="{metal_raised}"/>')
-
-    # Cut-out marks
-    cutout_paths = merge_horizontal_runs(cutout_mask)
-    if cutout_paths:
-        # Just mark with X, don't fill
-        pass
 
     lines.append('  </g>')
 
@@ -486,6 +491,7 @@ def build_spec_sheet(
     v2_y = v1_y
 
     lines.append(f'  <!-- VIEW 2: With print layer -->')
+    lines.append(f'  <text x="{v2_x + view_w / 2}" y="{v2_y - 6}" text-anchor="middle" class="title">With Print Layer</text>')
     lines.append(f'  <g id="View 2 - With Print" i:layer="yes" transform="translate({v2_x},{v2_y})">')
 
     # Same as view 1
@@ -514,66 +520,34 @@ def build_spec_sheet(
     lines.append(f'  <line x1="{v2_x}" y1="{dim_y_bot}" x2="{v2_x + view_w}" y2="{dim_y_bot}" stroke="#cc0000" stroke-width="0.5"/>')
     lines.append(f'  <text x="{v2_x + view_w / 2}" y="{dim_y_bot + 14}" text-anchor="middle" class="dim">{pin_width_mm:.2f} mm</text>')
 
-    # =========================================
-    # Cut-out marks (X) — only for interior holes, not background
-    # =========================================
-    # Interior holes are cut-out regions fully surrounded by the silhouette
-    # (not touching any edge of the image)
-    if np.sum(cutout_mask) > 50:
-        cutout_img = Image.fromarray(cutout_mask * 255, mode="L")
-        cutout_eroded = cutout_img.filter(ImageFilter.MinFilter(7))
-        cutout_arr = np.array(cutout_eroded) > 127
-
-        labeled = np.zeros_like(cutout_arr, dtype=int)
-        current_label = 0
-        for y in range(height):
-            for x in range(width):
-                if cutout_arr[y, x] and labeled[y, x] == 0:
-                    current_label += 1
-                    queue = [(y, x)]
-                    labeled[y, x] = current_label
-                    region_pixels = []
-                    touches_edge = False
-                    while queue:
-                        cy, cx = queue.pop(0)
-                        region_pixels.append((cx, cy))
-                        # Check if this pixel touches the image edge
-                        if cy == 0 or cy == height - 1 or cx == 0 or cx == width - 1:
-                            touches_edge = True
-                        for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                            ny, nx = cy + dy, cx + dx
-                            if 0 <= ny < height and 0 <= nx < width:
-                                if cutout_arr[ny, nx] and labeled[ny, nx] == 0:
-                                    labeled[ny, nx] = current_label
-                                    queue.append((ny, nx))
-
-                    # Only mark interior holes (not touching edge, reasonable size)
-                    if not touches_edge and 50 < len(region_pixels) < (width * height * 0.3):
-                        cx = sum(p[0] for p in region_pixels) // len(region_pixels)
-                        cy = sum(p[1] for p in region_pixels) // len(region_pixels)
-                        for vx in [v1_x, v2_x]:
-                            lines.append(f'  <text x="{vx + cx}" y="{v1_y + cy + 5}" text-anchor="middle" class="cutout">x</text>')
+    # Cut-out marks removed — not needed for solid pins
 
     # =========================================
     # BOTTOM: Print detail + Color Legend
     # =========================================
     bottom_y = margin + view_h + spacing + 20
 
-    # Print detail (bottom left)
+    # Print detail (bottom left) — scaled to fit within bottom section
     if print_mask is not None and print_color is not None:
         print_hex = f"#{print_color[0]:02x}{print_color[1]:02x}{print_color[2]:02x}"
         pantone_code, pantone_name = find_closest_pantone(*print_color)
 
+        # Scale print detail to fit in the available bottom space
+        max_detail_h = legend_h - 40  # Leave room for label below
+        detail_scale = min(1.0, max_detail_h / view_h)
+        detail_scale = min(detail_scale, (view_w * 0.8) / view_w)  # Also limit width
+
         lines.append(f'  <!-- Print detail layer -->')
-        lines.append(f'  <g id="Print Detail" i:layer="yes" transform="translate({margin},{bottom_y})">')
+        lines.append(f'  <g id="Print Detail" i:layer="yes" transform="translate({margin},{bottom_y}) scale({detail_scale:.3f})">')
         print_detail_paths = merge_horizontal_runs(print_mask)
         if print_detail_paths:
             lines.append(f'    <path d="{" ".join(print_detail_paths)}" fill="{print_hex}"/>')
         lines.append('  </g>')
 
-        # Print label
-        lines.append(f'  <rect x="{margin}" y="{bottom_y + view_h + 10}" width="16" height="12" fill="{print_hex}"/>')
-        lines.append(f'  <text x="{margin + 22}" y="{bottom_y + view_h + 20}" class="legend-text">print {pantone_code}</text>')
+        # Print label (below scaled detail)
+        label_y = bottom_y + int(view_h * detail_scale) + 10
+        lines.append(f'  <rect x="{margin}" y="{label_y}" width="16" height="12" fill="{print_hex}"/>')
+        lines.append(f'  <text x="{margin + 22}" y="{label_y + 10}" class="legend-text">print {pantone_code}</text>')
 
     # Color Legend (center-right area)
     legend_x = margin + view_w + spacing
@@ -607,10 +581,6 @@ def build_spec_sheet(
         lines.append(f'    <rect x="{legend_x}" y="{legend_y + row * 24}" width="40" height="16" fill="{hex_color}" stroke="#999" stroke-width="0.5"/>')
         lines.append(f'    <text x="{legend_x + 48}" y="{legend_y + row * 24 + 12}" class="legend-text">{pantone_name.lower()}  {pantone_code}</text>')
         row += 1
-
-    # Cut-out entry
-    lines.append(f'    <text x="{legend_x + 4}" y="{legend_y + row * 24 + 12}" class="cutout">x</text>')
-    lines.append(f'    <text x="{legend_x + 48}" y="{legend_y + row * 24 + 12}" class="legend-text">cut out</text>')
 
     lines.append('  </g>')
     lines.append('</svg>')
@@ -651,7 +621,7 @@ def vectorize_enamel(
     w, h = img.size
 
     # Step 0: Preprocess image for clean color extraction
-    print("Step 0: Preprocessing image (boost saturation, contrast, denoise)...")
+    print("Step 0: Simplifying image (flatten shading, posterize, boost color)...")
     img = preprocess_image(img)
 
     # Step 1: Initial quantization

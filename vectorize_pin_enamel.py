@@ -107,7 +107,7 @@ def preprocess_image(img: Image.Image) -> Image.Image:
 
     # Step 3: Boost saturation — makes distinct hues (blue china, gold) pop
     enhancer = ImageEnhance.Color(img)
-    img = enhancer.enhance(2.0)  # Strong boost after posterize
+    img = enhancer.enhance(1.5)  # Moderate boost — preserves browns vs pure orange
 
     # Step 4: Increase contrast to sharpen color region boundaries
     enhancer = ImageEnhance.Contrast(img)
@@ -731,7 +731,7 @@ def vectorize_enamel(
     # Step 4b: Final dedup — merge any remaining near-duplicate colors
     # (e.g., two yellows that slipped through hue selection)
     if len(merged) > 2:
-        merged = merge_similar_colors(merged, threshold=50.0)
+        merged = merge_similar_colors(merged, threshold=60.0)
         if len(merged) < num_colors:
             print(f"  Deduped to {len(merged)} distinct colors")
 

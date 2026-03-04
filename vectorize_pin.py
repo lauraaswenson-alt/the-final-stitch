@@ -310,12 +310,15 @@ def build_svg(
             rect.set("fill", f"#{bg_color[0]:02x}{bg_color[1]:02x}{bg_color[2]:02x}")
             sorted_layers = sorted_layers[1:]
 
-    for color, mask in sorted_layers:
+    total_layers = len(sorted_layers)
+    for idx, (color, mask) in enumerate(sorted_layers, 1):
         pixel_count = np.sum(mask)
         if pixel_count < 4:
             continue
 
         hex_color = f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+        print(f"  Layer {idx}/{total_layers}: {hex_color} ({int(pixel_count)} px)")
+
 
         if use_contours:
             contours = trace_contours(mask)
@@ -363,6 +366,7 @@ def vectorize(
     threshold: int | None = None,
     smooth: bool = False,
     max_dimension: int = 512,
+    use_contours: bool = False,
 ) -> str:
     """
     Main vectorization pipeline.
@@ -374,6 +378,7 @@ def vectorize(
         threshold: If set, convert to black & white at this threshold (0-255)
         smooth: Apply path smoothing for softer curves
         max_dimension: Scale image down if larger than this (for performance)
+        use_contours: Use contour tracing (slower) instead of rectangle merging (fast)
 
     Returns:
         Path to the generated SVG file.
@@ -413,8 +418,9 @@ def vectorize(
         quantized = quantize_colors(img, num_colors)
         layers = image_to_color_layers(quantized)
 
-    print(f"Tracing {len(layers)} color layers...")
-    svg_content = build_svg(w, h, layers, use_smooth=smooth, use_contours=True)
+    mode = "contour tracing" if use_contours else "rectangle merging"
+    print(f"Vectorizing {len(layers)} color layers ({mode})...")
+    svg_content = build_svg(w, h, layers, use_smooth=smooth, use_contours=use_contours)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(svg_content)
@@ -461,6 +467,11 @@ def main():
         default=512,
         help="Max image dimension before downscaling (default: 512)",
     )
+    parser.add_argument(
+        "--contours",
+        action="store_true",
+        help="Use contour tracing instead of rectangle merging (slower but smoother edges)",
+    )
 
     args = parser.parse_args()
 
@@ -477,6 +488,7 @@ def main():
         threshold=args.threshold,
         smooth=args.smooth,
         max_dimension=args.max_size,
+        use_contours=args.contours,
     )
 
 
